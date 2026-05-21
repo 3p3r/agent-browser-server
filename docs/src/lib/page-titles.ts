@@ -11,6 +11,7 @@ export const PAGE_TITLES: Record<string, string> = {
   diffing: "Diffing",
   "cdp-mode": "CDP Mode",
   dashboard: "Dashboard",
+  serve: "HTTP serve",
   streaming: "Streaming",
   profiler: "Profiler",
   ios: "iOS Simulator",

@@ -18,7 +18,7 @@ pub(crate) fn is_chat_enabled() -> bool {
     std::env::var("AI_GATEWAY_API_KEY").is_ok()
 }
 
-pub(super) fn chat_status_json() -> String {
+pub fn chat_status_json() -> String {
     let enabled = is_chat_enabled();
     let mut obj = json!({ "enabled": enabled });
     if enabled {
@@ -27,6 +27,34 @@ pub(super) fn chat_status_json() -> String {
         }
     }
     obj.to_string()
+}
+
+pub async fn fetch_models_json() -> serde_json::Value {
+    let gateway_url = std::env::var("AI_GATEWAY_URL")
+        .unwrap_or_else(|_| DEFAULT_AI_GATEWAY_URL.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = match std::env::var("AI_GATEWAY_API_KEY") {
+        Ok(k) => k,
+        Err(_) => return serde_json::json!({ "data": [] }),
+    };
+
+    let url = format!("{}/v1/models", gateway_url);
+    let client = http_client();
+    let result = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await;
+
+    let body = match result {
+        Ok(r) if r.status().is_success() => r
+            .text()
+            .await
+            .unwrap_or_else(|_| r#"{"data":[]}"#.to_string()),
+        _ => r#"{"data":[]}"#.to_string(),
+    };
+    serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "data": [] }))
 }
 
 pub(super) async fn handle_models_request(

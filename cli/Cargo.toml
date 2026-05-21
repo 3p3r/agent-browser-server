@@ -35,6 +35,9 @@ hex = "0.4"
 chrono = "0.4"
 urlencoding = "2"
 rust-embed = "8"
+salvo = { version = "0.93", features = ["oapi", "sse"] }
+salvo-oapi = { version = "0.93" }
+tokio-stream = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use crate::flags::Flags;
+
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
@@ -771,7 +773,125 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
 }
 
+/// Read timeout for a single daemon command, shared by sync and async clients.
+pub fn command_read_timeout(cmd: &Value, flags: &Flags) -> Duration {
+    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    if action.starts_with("wait") {
+        if let Some(ms) = cmd.get("timeout").and_then(|v| v.as_u64()) {
+            return Duration::from_millis(ms.saturating_add(5000));
+        }
+    }
+
+    if matches!(
+        action,
+        "trace_stop" | "profiler_stop" | "har_stop" | "recording_stop"
+    ) {
+        return Duration::from_secs(120);
+    }
+
+    let base = flags
+        .default_timeout
+        .map(|ms| Duration::from_millis(ms.saturating_add(5000)))
+        .unwrap_or(Duration::from_secs(30));
+
+    if base < Duration::from_secs(30) {
+        Duration::from_secs(30)
+    } else {
+        base
+    }
+}
+
+pub async fn send_command_async(
+    cmd: Value,
+    session: &str,
+    timeout: Duration,
+) -> Result<Response, String> {
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 200;
+
+    let mut last_error = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64))).await;
+        }
+
+        match send_command_once_async(&cmd, session, timeout).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                if is_transient_error(&e) {
+                    last_error = e;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Err(format!(
+        "{} (after {} retries - daemon may be busy or unresponsive)",
+        last_error, MAX_RETRIES
+    ))
+}
+
+async fn send_command_once_async(
+    cmd: &Value,
+    session: &str,
+    timeout: Duration,
+) -> Result<Response, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    #[cfg(unix)]
+    let stream = {
+        let socket_path = get_socket_path(session);
+        tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .map_err(|e| format!("Failed to connect: {}", e))?
+    };
+
+    #[cfg(windows)]
+    let stream = {
+        let port = resolve_port(session);
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .map_err(|e| format!("Failed to connect: {}", e))?
+    };
+
+    let (reader, mut writer) = tokio::io::split(stream);
+
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+    json_str.push('\n');
+
+    writer
+        .write_all(json_str.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to send: {}", e))?;
+
+    let read_fut = async {
+        let mut buf_reader = tokio::io::BufReader::new(reader);
+        let mut response_line = String::new();
+        buf_reader
+            .read_line(&mut response_line)
+            .await
+            .map_err(|e| format!("Failed to read: {}", e))?;
+        serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+    };
+
+    match tokio::time::timeout(timeout, read_fut).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "Timed out waiting for daemon response after {:?}",
+            timeout
+        )),
+    }
+}
+
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
+    send_command_with_flags(cmd, session, &crate::flags::parse_flags(&[]))
+}
+
+pub fn send_command_with_flags(cmd: Value, session: &str, flags: &Flags) -> Result<Response, String> {
+    let timeout = command_read_timeout(&cmd, flags);
     // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 200;
@@ -783,14 +903,13 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
             thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
         }
 
-        match send_command_once(&cmd, session) {
+        match send_command_once_with_timeout(&cmd, session, timeout) {
             Ok(response) => return Ok(response),
             Err(e) => {
                 if is_transient_error(&e) {
                     last_error = e;
                     continue;
                 }
-                // Non-transient error, fail immediately
                 return Err(e);
             }
         }
@@ -826,10 +945,14 @@ fn is_transient_error(error: &str) -> bool {
         || error.contains("os error 10054") // Connection reset by peer (Windows)
 }
 
-fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
+fn send_command_once_with_timeout(
+    cmd: &Value,
+    session: &str,
+    timeout: Duration,
+) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
@@ -1004,6 +1127,30 @@ mod tests {
         assert!(is_transient_error(
             "Failed to connect: No connection could be made because the target machine actively refused it. (os error 10061)"
         ));
+    }
+
+    #[test]
+    fn test_command_read_timeout_wait_action() {
+        let flags = crate::flags::parse_flags(&[]);
+        let cmd = serde_json::json!({ "action": "wait", "timeout": 10000 });
+        assert_eq!(
+            command_read_timeout(&cmd, &flags),
+            Duration::from_millis(15000)
+        );
+    }
+
+    #[test]
+    fn test_command_read_timeout_long_stop_actions() {
+        let flags = crate::flags::parse_flags(&[]);
+        let cmd = serde_json::json!({ "action": "profiler_stop" });
+        assert_eq!(command_read_timeout(&cmd, &flags), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_command_read_timeout_default_minimum() {
+        let flags = crate::flags::parse_flags(&[]);
+        let cmd = serde_json::json!({ "action": "click" });
+        assert_eq!(command_read_timeout(&cmd, &flags), Duration::from_secs(30));
     }
 
     #[test]

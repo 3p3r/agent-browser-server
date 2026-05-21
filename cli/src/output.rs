@@ -2535,6 +2535,42 @@ Examples:
 "##
         }
 
+        // === Serve (HTTP API) ===
+        "serve" => {
+            r##"
+agent-browser serve - HTTP API server
+
+Usage: agent-browser serve [options]
+
+Runs a foreground Salvo HTTP server that exposes CLI commands as REST
+endpoints under /api/.... OpenAPI at /openapi.json and Swagger UI at
+/swagger-ui/ document every session command with typed parameters and
+correct HTTP verbs (GET for reads, DELETE for clears/close, POST for
+actions). Host-only commands (install, dashboard, serve, doctor, upgrade) are CLI-only.
+Meta routes: health, sessions, execute, profiles, skills, chat, models.
+
+Options:
+  --host <addr>        Bind address (default: 127.0.0.1)
+  --port <n>           Listen port (default: 6578)
+  --cors <origin>      Allowed CORS origin (repeatable; default: *)
+
+Environment:
+  AGENT_BROWSER_SERVE              Set to run in serve mode (subprocess)
+  AGENT_BROWSER_SERVE_HOST         Bind host
+  AGENT_BROWSER_SERVE_PORT         Listen port
+  AGENT_BROWSER_SERVE_CORS         Comma-separated CORS origins
+
+Examples:
+  agent-browser serve
+  agent-browser serve --host 0.0.0.0 --port 6578
+  agent-browser serve --cors http://localhost:3000 --cors https://app.example.com
+  curl http://127.0.0.1:6578/api/health
+  curl 'http://127.0.0.1:6578/api/sessions/default/snapshot?interactive'
+  curl -X POST http://127.0.0.1:6578/api/sessions/default/click \
+    -H 'Content-Type: application/json' -d '{"selector":"@e1"}'
+"##
+        }
+
         // === Dashboard ===
         "dashboard" => {
             r##"
@@ -3054,6 +3090,9 @@ Dashboard:
   dashboard start --port <n> Start on a specific port
   dashboard stop             Stop the dashboard server
 
+HTTP API:
+  serve [--host] [--port] [--cors]   Run REST API server (default http://127.0.0.1:6578)
+
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
@@ -3167,6 +3206,10 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
+  AGENT_BROWSER_SERVE            Run in HTTP serve mode (subprocess)
+  AGENT_BROWSER_SERVE_HOST       HTTP serve bind host (default: 127.0.0.1)
+  AGENT_BROWSER_SERVE_PORT       HTTP serve listen port (default: 6578)
+  AGENT_BROWSER_SERVE_CORS       Comma-separated CORS origins for serve (default: *)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID

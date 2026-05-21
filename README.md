@@ -694,6 +694,36 @@ agent-browser click @e2     # Click the "Home" link labeled [2]
 
 This is useful for multimodal AI models that can reason about visual layout, unlabeled icon buttons, canvas elements, or visual state that the text accessibility tree cannot capture.
 
+## HTTP server mode
+
+Run a local REST API that mirrors CLI commands (separate from the observability dashboard):
+
+```bash
+agent-browser serve
+# Listening on http://127.0.0.1:6578 — Swagger UI at /swagger-ui/
+```
+
+<table>
+<tr><th>Flag</th><th>Default</th><th>Description</th></tr>
+<tr><td><code>--host</code></td><td><code>127.0.0.1</code></td><td>Bind address</td></tr>
+<tr><td><code>--port</code></td><td><code>6578</code></td><td>TCP port</td></tr>
+<tr><td><code>--cors</code></td><td><code>*</code></td><td>Allowed CORS origin (repeatable)</td></tr>
+</table>
+
+Examples:
+
+```bash
+curl http://127.0.0.1:6578/api/health
+curl 'http://127.0.0.1:6578/api/sessions/default/snapshot?interactive'
+curl -X POST http://127.0.0.1:6578/api/sessions/default/open \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com"}'
+curl -X DELETE http://127.0.0.1:6578/api/sessions/default/close
+```
+
+Swagger UI at `/swagger-ui/` lists every session command with typed parameters and GET/POST/DELETE verbs (reads via GET, clears and close via DELETE, actions via POST). Host-only workflows stay on the CLI: `install`, `dashboard`, `serve`, and `session`.
+
+Batch commands support Server-Sent Events with `"stream": true` on `POST /api/sessions/{session}/batch`. OpenAPI spec: `/openapi.json`. Use the CLI for `doctor` and `upgrade`.
+
 ## Options
 
 | Option | Description |

@@ -103,6 +103,81 @@ pub fn run_chat(flags: &Flags, message: Option<String>) {
     }
 }
 
+/// HTTP API: single-turn chat returning JSON (no stdout).
+pub async fn api_chat_json(session: &str, model: &str, message: &str) -> Value {
+    if !chat::is_chat_enabled() {
+        return json!({
+            "success": false,
+            "error": "AI_GATEWAY_API_KEY not set. Set the AI_GATEWAY_API_KEY environment variable to enable chat."
+        });
+    }
+
+    let mut openai_messages: Vec<Value> =
+        vec![json!({"role": "system", "content": chat::get_system_prompt()})];
+    openai_messages.push(json!({"role": "user", "content": message}));
+
+    // Single non-streaming completion (tool loop can be added later).
+    let gateway_url = std::env::var("AI_GATEWAY_URL")
+        .unwrap_or_else(|_| chat::DEFAULT_AI_GATEWAY_URL.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = std::env::var("AI_GATEWAY_API_KEY").unwrap_or_default();
+    let tools: Value = serde_json::from_str(chat::CHAT_TOOLS).unwrap();
+    let url = format!("{}/v1/chat/completions", gateway_url);
+    let client = chat::http_client();
+
+    let gateway_body = json!({
+        "model": model,
+        "messages": openai_messages,
+        "tools": tools,
+        "stream": false,
+    });
+
+    let gw_response = match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .body(gateway_body.to_string())
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({"success": false, "error": format!("Gateway request failed: {}", e)});
+        }
+    };
+
+    if !gw_response.status().is_success() {
+        let body_text = gw_response.text().await.unwrap_or_default();
+        return json!({"success": false, "error": body_text});
+    }
+
+    let result: Value = match gw_response.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return json!({"success": false, "error": format!("Invalid gateway response: {}", e)});
+        }
+    };
+
+    let text = result
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    json!({
+        "success": true,
+        "data": {
+            "session": session,
+            "text": text,
+            "messages": openai_messages,
+        }
+    })
+}
+
 async fn run_single_turn(
     session: &str,
     model: &str,

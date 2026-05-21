@@ -425,6 +425,56 @@ fn run_path(skills_dirs: &[PathBuf], name: Option<&str>, json_mode: bool) {
     }
 }
 
+pub fn list_skills_json() -> serde_json::Value {
+    let skills_dirs = find_skills_dirs();
+    if skills_dirs.is_empty() {
+        return json!({
+            "success": false,
+            "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+        });
+    }
+    let skills: Vec<serde_json::Value> = discover_skills(&skills_dirs)
+        .into_iter()
+        .filter(|s| !s.hidden)
+        .map(|s| json!({ "name": s.name, "description": s.description }))
+        .collect();
+    json!({ "success": true, "data": skills })
+}
+
+pub fn get_skill_json(name: &str, full: bool) -> serde_json::Value {
+    let skills_dirs = find_skills_dirs();
+    if skills_dirs.is_empty() {
+        return json!({
+            "success": false,
+            "error": "Skills directory not found.",
+        });
+    }
+    let all_skills = discover_skills(&skills_dirs);
+    let Some(skill) = all_skills.iter().find(|s| s.name == name) else {
+        return json!({
+            "success": false,
+            "error": format!("Skill not found: {}", name),
+        });
+    };
+    let skill_md = skill.dir.join("SKILL.md");
+    let content = read_skill_full(&skill_md).unwrap_or_default();
+    let mut obj = json!({
+        "name": skill.name,
+        "content": content,
+    });
+    if full {
+        let supplementary = collect_supplementary_files(&skill.dir);
+        if !supplementary.is_empty() {
+            let files: Vec<serde_json::Value> = supplementary
+                .iter()
+                .map(|(path, content)| json!({ "path": path, "content": content }))
+                .collect();
+            obj["files"] = json!(files);
+        }
+    }
+    json!({ "success": true, "data": obj })
+}
+
 pub fn run_skills(args: &[String], json_mode: bool) {
     let skills_dirs = find_skills_dirs();
     if skills_dirs.is_empty() {

@@ -37,6 +37,9 @@ __pycache__/
 *.jpg
 *.webm
 test/e2e/.dogfood-output/
+# Parity tests (cli/src/native/parity_tests.rs) write encrypted state scratch files
+test-parity-state.json
+test-parity-state.json.enc
 
 # Package manager
 package-lock.json

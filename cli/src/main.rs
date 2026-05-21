@@ -3,10 +3,12 @@ mod color;
 mod commands;
 mod connection;
 mod doctor;
+mod executor;
 mod flags;
 mod install;
 mod native;
 mod output;
+mod serve;
 mod skills;
 #[cfg(test)]
 mod test_utils;
@@ -25,8 +27,8 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use commands::{gen_id, parse_command, ParseError};
 use connection::{
-    cleanup_stale_files, ensure_daemon, get_socket_dir, is_pid_alive, send_command, walk_daemons,
-    DaemonOptions,
+    cleanup_stale_files, ensure_daemon, get_socket_dir, is_pid_alive, send_command,
+    send_command_with_flags, walk_daemons,
 };
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -58,69 +60,6 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
-}
-
-struct ParsedProxy {
-    server: String,
-    username: Option<String>,
-    password: Option<String>,
-}
-
-fn parse_proxy(proxy_str: &str) -> ParsedProxy {
-    let Some(protocol_end) = proxy_str.find("://") else {
-        return ParsedProxy {
-            server: proxy_str.to_string(),
-            username: None,
-            password: None,
-        };
-    };
-    let protocol = &proxy_str[..protocol_end + 3];
-    let rest = &proxy_str[protocol_end + 3..];
-
-    let Some(at_pos) = rest.rfind('@') else {
-        return ParsedProxy {
-            server: proxy_str.to_string(),
-            username: None,
-            password: None,
-        };
-    };
-
-    let creds = &rest[..at_pos];
-    let server_part = &rest[at_pos + 1..];
-    let server = format!("{}{}", protocol, server_part);
-
-    let (username, password) = match creds.find(':') {
-        Some(colon_pos) => {
-            let u = &creds[..colon_pos];
-            let p = &creds[colon_pos + 1..];
-            (
-                if u.is_empty() {
-                    None
-                } else {
-                    Some(u.to_string())
-                },
-                if p.is_empty() {
-                    None
-                } else {
-                    Some(p.to_string())
-                },
-            )
-        }
-        None => (
-            if creds.is_empty() {
-                None
-            } else {
-                Some(creds.to_string())
-            },
-            None,
-        ),
-    };
-
-    ParsedProxy {
-        server,
-        username,
-        password,
-    }
 }
 
 fn run_profiles(json_mode: bool) {
@@ -510,6 +449,14 @@ fn main() {
         return;
     }
 
+    // HTTP serve mode
+    if env::var("AGENT_BROWSER_SERVE").is_ok() {
+        let config = serve::ServerConfig::from_env();
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(serve::run_server(config));
+        return;
+    }
+
     let args: Vec<String> = env::args().skip(1).collect();
     let flags = parse_flags(&args);
     let clean = clean_args(&args);
@@ -618,6 +565,20 @@ fn main() {
         return;
     }
 
+    // Handle serve command
+    if clean.first().map(|s| s.as_str()) == Some("serve") {
+        let config = match serve::parse_serve_args(&clean[1..]) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("{} {}", color::error_indicator(), e);
+                exit(1);
+            }
+        };
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(serve::run_server(config));
+        return;
+    }
+
     // Handle chat command
     if clean.first().map(|s| s.as_str()) == Some("chat") {
         let message = if clean.len() > 1 {
@@ -692,25 +653,8 @@ fn main() {
         }
     }
 
-    // Handle state management commands locally — these are pure file operations
-    // that don't need a daemon, avoiding an unnecessary daemon startup that
-    // would lack runtime config like session_name.
-    if let Some(result) = native::state::dispatch_state_command(&cmd) {
+    if let Some(resp) = executor::state_response(&cmd) {
         let action = cmd.get("action").and_then(|v| v.as_str());
-        let resp = match result {
-            Ok(data) => connection::Response {
-                success: true,
-                data: Some(data),
-                error: None,
-                warning: None,
-            },
-            Err(e) => connection::Response {
-                success: false,
-                data: None,
-                error: Some(e),
-                warning: None,
-            },
-        };
         let output_opts = OutputOptions::from_flags(&flags);
         output::print_response_with_opts(&resp, action, &output_opts);
         if !resp.success {
@@ -719,46 +663,8 @@ fn main() {
         return;
     }
 
-    // Parse proxy URL to separate server from credentials for the daemon.
-    let (proxy_server, proxy_username, proxy_password) = if let Some(ref proxy_str) = flags.proxy {
-        let parsed = parse_proxy(proxy_str);
-        (Some(parsed.server), parsed.username, parsed.password)
-    } else {
-        (None, None, None)
-    };
-    let daemon_opts = DaemonOptions {
-        headed: flags.headed,
-        debug: flags.debug,
-        executable_path: flags.executable_path.as_deref(),
-        extensions: &flags.extensions,
-        init_scripts: &flags.init_scripts,
-        enable: &flags.enable,
-        args: flags.args.as_deref(),
-        user_agent: flags.user_agent.as_deref(),
-        proxy: proxy_server.as_deref(),
-        proxy_bypass: flags.proxy_bypass.as_deref(),
-        proxy_username: proxy_username.as_deref(),
-        proxy_password: proxy_password.as_deref(),
-        ignore_https_errors: flags.ignore_https_errors,
-        allow_file_access: flags.allow_file_access,
-        profile: flags.profile.as_deref(),
-        state: flags.state.as_deref(),
-        provider: flags.provider.as_deref(),
-        device: flags.device.as_deref(),
-        session_name: flags.session_name.as_deref(),
-        download_path: flags.download_path.as_deref(),
-        allowed_domains: flags.allowed_domains.as_deref(),
-        action_policy: flags.action_policy.as_deref(),
-        confirm_actions: flags.confirm_actions.as_deref(),
-        engine: flags.engine.as_deref(),
-        auto_connect: flags.auto_connect,
-        idle_timeout: flags.idle_timeout.as_deref(),
-        default_timeout: flags.default_timeout,
-        cdp: flags.cdp.as_deref(),
-        no_auto_dialog: flags.no_auto_dialog,
-    };
 
-    let daemon_result = match ensure_daemon(&flags.session, &daemon_opts) {
+    let daemon_result = match executor::ensure_daemon_for_flags(&flags) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -829,90 +735,38 @@ fn main() {
         }
     }
 
-    // Validate mutually exclusive options
-    if flags.cdp.is_some() && flags.provider.is_some() {
-        let msg = "Cannot use --cdp and -p/--provider together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.auto_connect && flags.cdp.is_some() {
-        let msg = "Cannot use --auto-connect and --cdp together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.auto_connect && flags.provider.is_some() {
-        let msg = "Cannot use --auto-connect and -p/--provider together";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.provider.is_some() && !flags.extensions.is_empty() {
-        let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    if flags.cdp.is_some() && !flags.extensions.is_empty() {
-        let msg = "Cannot use --extension with --cdp (extensions require local browser)";
-        if flags.json {
-            print_json_error(msg);
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
-
-    // Auto-connect to existing browser.
-    // Skip when the daemon was already running — it already holds the connection
-    // from a previous auto-connect launch, so re-sending the launch command would
-    // redundantly probe Chrome and may trigger repeated permission prompts (#962).
-    if flags.auto_connect && !daemon_result.already_running {
-        let mut launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "autoConnect": true
-        });
-
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
-                resp.error
-                    .unwrap_or_else(|| "Auto-connect failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
+    if let Err(e) = executor::validate_mutex_options(&flags) {
+        let msg = match e {
+            executor::ExecutorError::MutexOptions(m) | executor::ExecutorError::Message(m) => m,
+            executor::ExecutorError::Parse(p) => p.format(),
         };
+        if flags.json {
+            print_json_error(msg);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
+    }
 
-        if let Some(msg) = err {
+    // Batch with stdin (no embedded commands in parsed JSON)
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("batch")
+        && cmd.get("commands").is_none()
+    {
+        let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        run_batch(&flags, bail, None);
+        return;
+    }
+
+    let ctx = executor::ExecutorContext { flags: &flags };
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let outcome = match rt.block_on(executor::execute_command_value(cmd.clone(), &ctx)) {
+        Ok(o) => o,
+        Err(e) => {
+            let msg = match e {
+                executor::ExecutorError::Message(m)
+                | executor::ExecutorError::MutexOptions(m) => m,
+                executor::ExecutorError::Parse(p) => p.format(),
+            };
             if flags.json {
                 print_json_error(msg);
             } else {
@@ -920,289 +774,16 @@ fn main() {
             }
             exit(1);
         }
-    }
-
-    // Connect via CDP if --cdp flag is set
-    // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
-    // Skip when daemon already running — it already holds the CDP connection.
-    if let Some(ref cdp_value) = flags.cdp {
-        // Validate CDP value eagerly (even when daemon is already running) so
-        // the user gets an immediate error for bad input instead of a silent no-op.
-        let launch_cmd = if cdp_value.starts_with("ws://")
-            || cdp_value.starts_with("wss://")
-            || cdp_value.starts_with("http://")
-            || cdp_value.starts_with("https://")
-        {
-            // It's a URL - use cdpUrl field
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpUrl": cdp_value
-            })
-        } else {
-            // It's a port number - validate and use cdpPort field
-            let cdp_port: u16 = match cdp_value.parse::<u32>() {
-                Ok(0) => {
-                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-                Ok(p) if p > 65535 => {
-                    let msg = format!(
-                        "Invalid CDP port: {} is out of range (valid range: 1-65535)",
-                        p
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-                Ok(p) => p as u16,
-                Err(_) => {
-                    let msg = format!(
-                        "Invalid CDP value: '{}' is not a valid port number or URL",
-                        cdp_value
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-            };
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpPort": cdp_port
-            })
-        };
-
-        if !daemon_result.already_running {
-            let mut launch_cmd = launch_cmd;
-
-            if flags.ignore_https_errors {
-                launch_cmd["ignoreHTTPSErrors"] = json!(true);
-            }
-
-            if let Some(ref cs) = flags.color_scheme {
-                launch_cmd["colorScheme"] = json!(cs);
-            }
-
-            if let Some(ref dp) = flags.download_path {
-                launch_cmd["downloadPath"] = json!(dp);
-            }
-
-            let err = match send_command(launch_cmd, &flags.session) {
-                Ok(resp) if resp.success => None,
-                Ok(resp) => Some(
-                    resp.error
-                        .unwrap_or_else(|| "CDP connection failed".to_string()),
-                ),
-                Err(e) => Some(e.to_string()),
-            };
-
-            if let Some(msg) = err {
-                if flags.json {
-                    print_json_error(msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
-        }
-    }
-
-    // Launch with cloud provider if -p flag is set
-    // Skip when daemon already running — it already holds the provider connection.
-    if let Some(ref provider) = flags.provider {
-        if !daemon_result.already_running {
-            let mut launch_cmd = json!({
-                "id": gen_id(),
-                "action": "launch",
-                "provider": provider
-            });
-
-            if let Some(ref cs) = flags.color_scheme {
-                launch_cmd["colorScheme"] = json!(cs);
-            }
-
-            let err = match send_command(launch_cmd, &flags.session) {
-                Ok(resp) if resp.success => None,
-                Ok(resp) => Some(
-                    resp.error
-                        .unwrap_or_else(|| "Provider connection failed".to_string()),
-                ),
-                Err(e) => Some(e.to_string()),
-            };
-
-            if let Some(msg) = err {
-                if flags.json {
-                    print_json_error(msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
-        }
-    }
-
-    // Launch headed browser or configure browser options (without CDP or provider)
-    if (flags.headed
-        || flags.cli_headed  // User explicitly set --headed (even if false)
-        || flags.executable_path.is_some()
-        || flags.profile.is_some()
-        || flags.state.is_some()
-        || flags.proxy.is_some()
-        || flags.args.is_some()
-        || flags.user_agent.is_some()
-        || flags.allow_file_access
-        || flags.color_scheme.is_some()
-        || flags.download_path.is_some()
-        || flags.engine.is_some()
-        || !flags.extensions.is_empty())
-        && flags.cdp.is_none()
-        && flags.provider.is_none()
-        && !flags.auto_connect
-    {
-        let mut launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "headless": !flags.headed
-        });
-
-        let cmd_obj = launch_cmd
-            .as_object_mut()
-            .expect("json! macro guarantees object type");
-
-        // Add executable path if specified
-        if let Some(ref exec_path) = flags.executable_path {
-            cmd_obj.insert("executablePath".to_string(), json!(exec_path));
-        }
-
-        // Add profile path if specified
-        if let Some(ref profile_path) = flags.profile {
-            cmd_obj.insert("profile".to_string(), json!(profile_path));
-        }
-
-        // Add state path if specified
-        if let Some(ref state_path) = flags.state {
-            cmd_obj.insert("storageState".to_string(), json!(state_path));
-        }
-
-        if let Some(ref proxy_str) = flags.proxy {
-            let parsed = parse_proxy(proxy_str);
-            let mut proxy_obj = json!({ "server": parsed.server });
-            if let Some(ref username) = parsed.username {
-                proxy_obj["username"] = json!(username);
-            }
-            if let Some(ref password) = parsed.password {
-                proxy_obj["password"] = json!(password);
-            }
-            if let Some(ref bypass) = flags.proxy_bypass {
-                proxy_obj["bypass"] = json!(bypass);
-            }
-            cmd_obj.insert("proxy".to_string(), proxy_obj);
-        }
-
-        if let Some(ref ua) = flags.user_agent {
-            cmd_obj.insert("userAgent".to_string(), json!(ua));
-        }
-
-        if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            cmd_obj.insert("args".to_string(), json!(args_vec));
-        }
-
-        if !flags.extensions.is_empty() {
-            cmd_obj.insert("extensions".to_string(), json!(&flags.extensions));
-        }
-
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
-
-        if flags.allow_file_access {
-            launch_cmd["allowFileAccess"] = json!(true);
-        }
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
-
-        if let Some(ref domains) = flags.allowed_domains {
-            launch_cmd["allowedDomains"] = json!(domains);
-        }
-
-        if let Some(ref engine) = flags.engine {
-            launch_cmd["engine"] = json!(engine);
-        }
-
-        match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if !resp.success => {
-                // Launch command failed (e.g., invalid state file, profile error)
-                let error_msg = resp
-                    .error
-                    .unwrap_or_else(|| "Browser launch failed".to_string());
-                if flags.json {
-                    print_json_error(error_msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), error_msg);
-                }
-                exit(1);
-            }
-            Err(e) => {
-                if flags.json {
-                    print_json_error(e);
-                } else {
-                    eprintln!(
-                        "{} Could not configure browser: {}",
-                        color::error_indicator(),
-                        e
-                    );
-                }
-                exit(1);
-            }
-            Ok(_) => {
-                // Launch succeeded
-            }
-        }
-    }
-
-    // Handle batch command: from args or stdin
-    if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
-        let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
-        let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(commands::shell_words_split)
-                .collect::<Vec<Vec<String>>>()
-        });
-        run_batch(&flags, bail, arg_commands);
-        return;
-    }
+    };
 
     let output_opts = OutputOptions::from_flags(&flags);
 
-    match send_command(cmd.clone(), &flags.session) {
-        Ok(resp) => {
+    match outcome {
+        executor::ExecutorOutcome::Batch(items) => {
+            print_batch_results(&flags, &output_opts, items);
+        }
+        executor::ExecutorOutcome::Response(resp) => {
             let success = resp.success;
-            // Handle interactive confirmation
             if flags.confirm_interactive {
                 if let Some(data) = &resp.data {
                     if data
@@ -1238,7 +819,7 @@ fn main() {
                             json!({ "id": gen_id(), "action": "deny", "confirmationId": cid })
                         };
 
-                        match send_command(confirm_cmd, &flags.session) {
+                        match send_command_with_flags(confirm_cmd, &flags.session, &flags) {
                             Ok(r) => {
                                 if !approved {
                                     eprintln!("{} Action denied", color::error_indicator());
@@ -1255,23 +836,96 @@ fn main() {
                     }
                 }
             }
-            // Extract action for context-specific output handling
             let action = cmd.get("action").and_then(|v| v.as_str());
             print_response_with_opts(&resp, action, &output_opts);
             if !success {
                 exit(1);
             }
         }
-        Err(e) => {
-            if flags.json {
-                print_json_error(e);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), e);
-            }
-            exit(1);
-        }
     }
 }
+
+fn print_batch_results(
+    flags: &Flags,
+    output_opts: &OutputOptions,
+    items: Vec<executor::BatchItemResult>,
+) {
+    if flags.json {
+        let results: Vec<serde_json::Value> = items
+            .iter()
+            .map(|item| {
+                if let Some(ref err) = item.parse_error {
+                    json!({
+                        "command": item.command,
+                        "success": false,
+                        "error": err,
+                    })
+                } else if let Some(ref err) = item.transport_error {
+                    json!({
+                        "command": item.command,
+                        "success": false,
+                        "error": err,
+                    })
+                } else if let Some(ref resp) = item.response {
+                    json!({
+                        "command": item.command,
+                        "success": resp.success,
+                        "result": resp.data,
+                        "error": resp.error,
+                    })
+                } else {
+                    json!({ "command": item.command, "success": false })
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&results).unwrap_or_else(|_| "[]".into()));
+        if items.iter().any(|i| {
+            i.parse_error.is_some()
+                || i.transport_error.is_some()
+                || i.response.as_ref().is_some_and(|r| !r.success)
+        }) {
+            exit(1);
+        }
+        return;
+    }
+
+    let mut had_error = false;
+    for (i, item) in items.iter().enumerate() {
+        if let Some(ref err) = item.parse_error {
+            had_error = true;
+            eprintln!(
+                "{} Command {}: {}",
+                color::error_indicator(),
+                i + 1,
+                err
+            );
+            continue;
+        }
+        if let Some(ref err) = item.transport_error {
+            had_error = true;
+            eprintln!(
+                "{} Command {}: {}",
+                color::error_indicator(),
+                i + 1,
+                err
+            );
+            continue;
+        }
+        if let Some(ref resp) = item.response {
+            if i > 0 {
+                println!();
+            }
+            print_response_with_opts(resp, item.action.as_deref(), output_opts);
+            if !resp.success {
+                had_error = true;
+            }
+        }
+    }
+    if had_error {
+        exit(1);
+    }
+}
+
 
 fn run_batch(flags: &Flags, bail: bool, arg_commands: Option<Vec<Vec<String>>>) {
     let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
@@ -1423,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_simple() {
-        let result = parse_proxy("http://proxy.com:8080");
+        let result = executor::parse_proxy("http://proxy.com:8080");
         assert_eq!(result.server, "http://proxy.com:8080");
         assert!(result.username.is_none());
         assert!(result.password.is_none());
@@ -1431,7 +1085,7 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_with_auth() {
-        let result = parse_proxy("http://user:pass@proxy.com:8080");
+        let result = executor::parse_proxy("http://user:pass@proxy.com:8080");
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("pass"));
@@ -1439,7 +1093,7 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_username_only() {
-        let result = parse_proxy("http://user@proxy.com:8080");
+        let result = executor::parse_proxy("http://user@proxy.com:8080");
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert!(result.password.is_none());
@@ -1447,21 +1101,21 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_no_protocol() {
-        let result = parse_proxy("proxy.com:8080");
+        let result = executor::parse_proxy("proxy.com:8080");
         assert_eq!(result.server, "proxy.com:8080");
         assert!(result.username.is_none());
     }
 
     #[test]
     fn test_parse_proxy_socks5() {
-        let result = parse_proxy("socks5://proxy.com:1080");
+        let result = executor::parse_proxy("socks5://proxy.com:1080");
         assert_eq!(result.server, "socks5://proxy.com:1080");
         assert!(result.username.is_none());
     }
 
     #[test]
     fn test_parse_proxy_socks5_with_auth() {
-        let result = parse_proxy("socks5://admin:secret@proxy.com:1080");
+        let result = executor::parse_proxy("socks5://admin:secret@proxy.com:1080");
         assert_eq!(result.server, "socks5://proxy.com:1080");
         assert_eq!(result.username.as_deref(), Some("admin"));
         assert_eq!(result.password.as_deref(), Some("secret"));
@@ -1469,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_complex_password() {
-        let result = parse_proxy("http://user:p@ss:w0rd@proxy.com:8080");
+        let result = executor::parse_proxy("http://user:p@ss:w0rd@proxy.com:8080");
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));

@@ -1,0 +1,143 @@
+# HTTP serve mode
+
+Run `agent-browser serve` to expose CLI commands as a local REST API. This mode uses [Salvo](https://salvo.rs/) and is separate from the [observability dashboard](/dashboard).
+
+## Start the server
+
+```bash
+agent-browser serve
+agent-browser serve --host 127.0.0.1 --port 6578
+agent-browser serve --cors http://localhost:3000
+```
+
+<table>
+  <thead>
+    <tr>
+      <th>Flag</th>
+      <th>Default</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>--host</code></td>
+      <td><code>127.0.0.1</code></td>
+      <td>Bind address</td>
+    </tr>
+    <tr>
+      <td><code>--port</code></td>
+      <td><code>6578</code></td>
+      <td>TCP listen port</td>
+    </tr>
+    <tr>
+      <td><code>--cors</code></td>
+      <td><code>*</code></td>
+      <td>Allowed CORS origin (repeatable)</td>
+    </tr>
+  </tbody>
+</table>
+
+Environment variables: `AGENT_BROWSER_SERVE_HOST`, `AGENT_BROWSER_SERVE_PORT`, `AGENT_BROWSER_SERVE_CORS` (comma-separated origins).
+
+## Discovery
+
+- `GET /api/health` — version and status
+- `GET /openapi.json` — OpenAPI document
+- `GET /swagger-ui/` — Swagger UI with typed parameters per command
+
+## CLI-only (not on REST)
+
+<table>
+  <thead>
+    <tr>
+      <th>Command</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>install</code></td>
+      <td>Downloads Chrome; interactive host install</td>
+    </tr>
+    <tr>
+      <td><code>serve</code></td>
+      <td>This HTTP server itself</td>
+    </tr>
+    <tr>
+      <td><code>dashboard</code></td>
+      <td>Separate observability UI process</td>
+    </tr>
+    <tr>
+      <td><code>session</code></td>
+      <td>Session name management on disk</td>
+    </tr>
+    <tr>
+      <td><code>doctor</code></td>
+      <td>Install diagnostics; use <code>agent-browser doctor</code> on the host</td>
+    </tr>
+    <tr>
+      <td><code>upgrade</code></td>
+      <td>Self-update; use <code>agent-browser upgrade</code> on the host</td>
+    </tr>
+  </tbody>
+</table>
+
+## Typed parameters and HTTP verbs
+
+Each catalog CLI command has a matching route with **typed** OpenAPI fields (not a generic `args` array):
+
+<table>
+  <thead>
+    <tr>
+      <th>Verb</th>
+      <th>Use for</th>
+      <th>Parameters</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>GET</code></td>
+      <td>Reads (<code>get/text</code>, <code>snapshot</code>, <code>cookies</code>, …)</td>
+      <td>Query string (<code>selector</code>, <code>interactive</code>, …)</td>
+    </tr>
+    <tr>
+      <td><code>DELETE</code></td>
+      <td>Close/clear (<code>close</code>, <code>cookies/clear</code>, …)</td>
+      <td>Query string</td>
+    </tr>
+    <tr>
+      <td><code>POST</code></td>
+      <td>Actions (<code>click</code>, <code>fill</code>, <code>goto</code>, …)</td>
+      <td>JSON body</td>
+    </tr>
+  </tbody>
+</table>
+
+Global CLI flags (<code>json</code>, <code>headed</code>, <code>proxy</code>, …) are always supported as query parameters on any verb.
+
+## API overview
+
+- `POST /api/execute` — run any command via raw <code>args</code> argv list
+- `POST /api/sessions/{session}/execute` — same, session in path
+- `GET|POST|DELETE /api/sessions/{session}/{command/path}` — typed catalog routes (see Swagger)
+- `GET|POST|DELETE /api/sessions/{session}/{**rest}` — fallback for dynamic paths (<code>tab/3</code>)
+- `POST /api/sessions/{session}/batch` — batch with optional SSE (<code>"stream": true</code>)
+
+## Examples
+
+```bash
+curl http://127.0.0.1:6578/api/health
+curl 'http://127.0.0.1:6578/api/sessions/default/snapshot?interactive'
+curl -X POST http://127.0.0.1:6578/api/sessions/default/open \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com"}'
+curl -X DELETE http://127.0.0.1:6578/api/sessions/default/close
+```
+
+Batch streaming:
+
+```bash
+curl -N -X POST http://127.0.0.1:6578/api/sessions/default/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"stream":true,"commands":[["snapshot","-i"]]}'
+```

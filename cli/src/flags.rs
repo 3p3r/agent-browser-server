@@ -830,6 +830,112 @@ pub fn parse_flags(args: &[String]) -> Flags {
     flags
 }
 
+/// Map HTTP query/body flag keys to CLI `--flag` names.
+pub fn http_flag_name(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "session" => "session",
+        "json" => "json",
+        "headed" => "headed",
+        "debug" => "debug",
+        "sessionName" | "session_name" => "session-name",
+        "executablePath" | "executable_path" => "executable-path",
+        "cdp" => "cdp",
+        "provider" => "provider",
+        "profile" => "profile",
+        "state" => "state",
+        "proxy" => "proxy",
+        "proxyBypass" | "proxy_bypass" => "proxy-bypass",
+        "userAgent" | "user_agent" => "user-agent",
+        "device" => "device",
+        "engine" => "engine",
+        "model" => "model",
+        "defaultTimeout" | "default_timeout" => "default-timeout",
+        "autoConnect" | "auto_connect" => "auto-connect",
+        "ignoreHttpsErrors" | "ignore_https_errors" => "ignore-https-errors",
+        "allowFileAccess" | "allow_file_access" => "allow-file-access",
+        "headers" => "headers",
+        "annotate" => "annotate",
+        "colorScheme" | "color_scheme" => "color-scheme",
+        "downloadPath" | "download_path" => "download-path",
+        "contentBoundaries" | "content_boundaries" => "content-boundaries",
+        "maxOutput" | "max_output" => "max-output",
+        "allowedDomains" | "allowed_domains" => "allowed-domains",
+        "actionPolicy" | "action_policy" => "action-policy",
+        "confirmActions" | "confirm_actions" => "confirm-actions",
+        "confirmInteractive" | "confirm_interactive" => "confirm-interactive",
+        "screenshotDir" | "screenshot_dir" => "screenshot-dir",
+        "screenshotQuality" | "screenshot_quality" => "screenshot-quality",
+        "screenshotFormat" | "screenshot_format" => "screenshot-format",
+        "idleTimeout" | "idle_timeout" => "idle-timeout",
+        "noAutoDialog" | "no_auto_dialog" => "no-auto-dialog",
+        "verbose" => "verbose",
+        "quiet" => "quiet",
+        _ => return None,
+    })
+}
+
+fn push_http_flag_argv(argv: &mut Vec<String>, key: &str, val: &serde_json::Value) {
+    let Some(flag) = http_flag_name(key) else {
+        return;
+    };
+    match val {
+        serde_json::Value::Bool(b) => {
+            argv.push(format!("--{}", flag));
+            if !b {
+                argv.push("false".to_string());
+            }
+        }
+        serde_json::Value::String(s) => {
+            argv.push(format!("--{}", flag));
+            argv.push(s.clone());
+        }
+        serde_json::Value::Number(n) => {
+            argv.push(format!("--{}", flag));
+            argv.push(n.to_string());
+        }
+        _ => {}
+    }
+}
+
+/// Build argv for [`parse_flags`] from HTTP query parameters (`?headed=true`).
+pub fn argv_from_http_pairs(pairs: &[(&str, &str)]) -> Vec<String> {
+    let mut argv = Vec::new();
+    for (k, v) in pairs {
+        if k.is_empty() || v.is_empty() {
+            continue;
+        }
+        if let Some(flag) = http_flag_name(k) {
+            argv.push(format!("--{}", flag));
+            argv.push((*v).to_string());
+        } else {
+            argv.push(format!("--{}", k));
+            argv.push((*v).to_string());
+        }
+    }
+    argv
+}
+
+/// Build argv for [`parse_flags`] from a JSON flags object in the request body.
+pub fn argv_from_http_json(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut argv = Vec::new();
+    for (k, v) in obj {
+        push_http_flag_argv(&mut argv, k, v);
+    }
+    argv
+}
+
+/// Parse global flags from HTTP query string and optional JSON overrides (used by serve mode).
+pub fn flags_from_http(
+    query_pairs: &[(&str, &str)],
+    body_flags: Option<&serde_json::Value>,
+) -> Flags {
+    let mut argv = argv_from_http_pairs(query_pairs);
+    if let Some(obj) = body_flags.and_then(|v| v.as_object()) {
+        argv.extend(argv_from_http_json(obj));
+    }
+    parse_flags(&argv)
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;

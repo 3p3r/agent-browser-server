@@ -1,6 +1,11 @@
+pub mod catalog;
+pub mod http_routes;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
+
+pub use catalog::{openapi_tag, SESSION_HTTP_PATHS};
 
 use crate::color;
 use crate::flags::Flags;
@@ -480,7 +485,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: &["type", "inserttext"],
+                    valid_options: catalog::KEYBOARD,
                 }),
             }
         }
@@ -913,7 +918,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 _ => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.unwrap_or("(none)").to_string(),
-                    valid_options: &["save", "login", "list", "delete", "show"],
+                    valid_options: catalog::AUTH,
                 }),
             }
         }
@@ -1028,7 +1033,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Some("status") => Ok(json!({ "id": id, "action": "stream_status" })),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
-                valid_options: &["enable", "disable", "status"],
+                valid_options: catalog::STREAM,
             }),
             None => Err(ParseError::MissingArguments {
                 context: "stream".to_string(),
@@ -1272,12 +1277,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Window ===
         "window" => {
-            const VALID: &[&str] = &["new"];
             match rest.first().copied() {
                 Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::WINDOW,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "window".to_string(),
@@ -1301,7 +1305,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Dialog ===
         "dialog" => {
-            const VALID: &[&str] = &["accept", "dismiss", "status"];
             match rest.first().copied() {
                 Some("accept") => {
                     let mut cmd = json!({ "id": id, "action": "dialog", "response": "accept" });
@@ -1320,7 +1323,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 Some("status") => Ok(json!({ "id": id, "action": "dialog", "response": "status" })),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::DIALOG,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "dialog".to_string(),
@@ -1331,7 +1334,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Debug ===
         "trace" => {
-            const VALID: &[&str] = &["start", "stop"];
             match rest.first().copied() {
                 Some("start") => Ok(json!({ "id": id, "action": "trace_start" })),
                 Some("stop") => {
@@ -1343,7 +1345,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::TRACE,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "trace".to_string(),
@@ -1354,7 +1356,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Profiler (CDP Tracing / Chromium profiling) ===
         "profiler" => {
-            const VALID: &[&str] = &["start", "stop"];
             match rest.first().copied() {
                 Some("start") => {
                     let mut cmd = json!({ "id": id, "action": "profiler_start" });
@@ -1380,7 +1381,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::PROFILER,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "profiler".to_string(),
@@ -1391,7 +1392,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Recording (browser video recording) ===
         "record" => {
-            const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
                 Some("start") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1434,7 +1434,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::RECORD,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
@@ -1475,13 +1475,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Some("paste") => Ok(json!({ "id": id, "action": "clipboard", "operation": "paste" })),
             Some(sub) => Err(ParseError::UnknownSubcommand {
                 subcommand: sub.to_string(),
-                valid_options: &["read", "write", "copy", "paste"],
+                valid_options: catalog::CLIPBOARD,
             }),
         },
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
             match rest.first().copied() {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -1590,7 +1589,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: VALID,
+                    valid_options: catalog::STATE,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
@@ -1638,7 +1637,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: &["list"],
+                    valid_options: catalog::DEVICE,
                 }),
             }
         }
@@ -1697,7 +1696,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 }
 
 fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["tree", "inspect", "renders", "suspense"];
     let sub = rest.first().copied().ok_or(ParseError::MissingArguments {
         context: "react".to_string(),
         usage: "react <tree|inspect|renders|suspense>",
@@ -1739,7 +1737,7 @@ fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 "stop" => Ok(flag("react_renders_stop")),
                 other => Err(ParseError::UnknownSubcommand {
                     subcommand: other.to_string(),
-                    valid_options: &["start", "stop"],
+                    valid_options: catalog::REACT_RENDERS,
                 }),
             }
         }
@@ -1756,14 +1754,12 @@ fn parse_react(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         other => Err(ParseError::UnknownSubcommand {
             subcommand: other.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::REACT,
         }),
     }
 }
 
 fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["snapshot", "screenshot", "url"];
-
     match rest.first().copied() {
         Some("snapshot") => {
             let mut cmd = json!({ "id": id, "action": "diff_snapshot" });
@@ -2025,7 +2021,7 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::DIFF,
         }),
         None => Err(ParseError::MissingArguments {
             context: "diff".to_string(),
@@ -2035,10 +2031,6 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "text", "html", "value", "attr", "url", "title", "count", "box", "styles", "cdp-url",
-    ];
-
     match rest.first().copied() {
         Some("text") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2098,7 +2090,7 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::GET,
         }),
         None => Err(ParseError::MissingArguments {
             context: "get".to_string(),
@@ -2108,8 +2100,6 @@ fn parse_get(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["visible", "enabled", "checked"];
-
     match rest.first().copied() {
         Some("visible") => {
             let sel = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2134,7 +2124,7 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::IS,
         }),
         None => Err(ParseError::MissingArguments {
             context: "is".to_string(),
@@ -2144,19 +2134,6 @@ fn parse_is(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "role",
-        "text",
-        "label",
-        "placeholder",
-        "alt",
-        "title",
-        "testid",
-        "first",
-        "last",
-        "nth",
-    ];
-
     let locator = rest.first().ok_or_else(|| ParseError::MissingArguments {
         context: "find".to_string(),
         usage: "find <locator> <value> [action] [text]",
@@ -2302,14 +2279,12 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         _ => Err(ParseError::UnknownSubcommand {
             subcommand: locator.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::FIND,
         }),
     }
 }
 
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["move", "down", "up", "wheel"];
-
     match rest.first().copied() {
         Some("move") => {
             let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2350,7 +2325,7 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::MOUSE,
         }),
         None => Err(ParseError::MissingArguments {
             context: "mouse".to_string(),
@@ -2360,18 +2335,6 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &[
-        "viewport",
-        "device",
-        "geo",
-        "geolocation",
-        "offline",
-        "headers",
-        "credentials",
-        "auth",
-        "media",
-    ];
-
     match rest.first().copied() {
         Some("viewport") => {
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2486,7 +2449,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::SET,
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
@@ -2497,8 +2460,6 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
-
     match rest.first().copied() {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2559,7 +2520,6 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "request_detail", "requestId": request_id }))
         }
         Some("har") => {
-            const HAR_VALID: &[&str] = &["start", "stop"];
             match rest.get(1).copied() {
                 Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
                 Some("stop") => {
@@ -2571,7 +2531,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
-                    valid_options: HAR_VALID,
+                    valid_options: catalog::NETWORK_HAR,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "network har".to_string(),
@@ -2581,7 +2541,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::NETWORK,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
@@ -2591,8 +2551,6 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 }
 
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["local", "session"];
-
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
@@ -2632,7 +2590,7 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
-            valid_options: VALID,
+            valid_options: catalog::STORAGE_TYPES,
         }),
         None => Err(ParseError::MissingArguments {
             context: "storage".to_string(),

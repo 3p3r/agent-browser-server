@@ -119,12 +119,42 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
     let exit_code = if summary.fail > 0 { 1 } else { 0 };
 
     if opts.json {
-        print_json(&checks, &summary, &fixed, exit_code == 0);
+        let payload = doctor_payload(&checks, &summary, &fixed, exit_code == 0);
+        println!("{}", payload);
     } else {
         print_text(&checks, &summary, &fixed, opts.fix);
     }
 
     exit_code
+}
+
+/// Run doctor checks and return a JSON report (for `--json`).
+pub fn doctor_report(opts: DoctorOptions) -> Value {
+    let mut checks: Vec<Check> = Vec::new();
+    let mut fixed: Vec<String> = Vec::new();
+
+    environment::check(&mut checks);
+    chrome::check(&mut checks);
+    daemon::check(&mut checks);
+    config::check(&mut checks);
+    security::check(&mut checks);
+    providers::check(&mut checks);
+
+    if !opts.offline {
+        network::check(&mut checks);
+    }
+
+    if !opts.quick {
+        launch::check(&mut checks);
+    }
+
+    if opts.fix {
+        fix::run(&mut checks, &mut fixed);
+    }
+
+    let summary = summarize(&checks);
+    let success = summary.fail == 0;
+    doctor_payload(&checks, &summary, &fixed, success)
 }
 
 struct Summary {
@@ -197,7 +227,7 @@ fn print_text(checks: &[Check], summary: &Summary, fixed: &[String], fix_ran: bo
     }
 }
 
-fn print_json(checks: &[Check], summary: &Summary, fixed: &[String], success: bool) {
+fn doctor_payload(checks: &[Check], summary: &Summary, fixed: &[String], success: bool) -> Value {
     let checks_json: Vec<Value> = checks
         .iter()
         .map(|c| {
@@ -214,7 +244,7 @@ fn print_json(checks: &[Check], summary: &Summary, fixed: &[String], success: bo
         })
         .collect();
 
-    let payload = json!({
+    json!({
         "success": success,
         "summary": {
             "pass": summary.pass,
@@ -223,8 +253,7 @@ fn print_json(checks: &[Check], summary: &Summary, fixed: &[String], success: bo
         },
         "checks": checks_json,
         "fixed": fixed,
-    });
-    println!("{}", payload);
+    })
 }
 
 #[cfg(test)]

@@ -473,4 +473,5 @@ That pulls in:
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/proxy-support.md` — proxy configuration
+- `references/serve.md` — HTTP REST API (`agent-browser serve`)
 - `templates/*` — starter shell scripts for auth, capture, form automation
